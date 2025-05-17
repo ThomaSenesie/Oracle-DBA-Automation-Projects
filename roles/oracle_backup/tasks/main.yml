@@ -1,0 +1,49 @@
+---
+# tasks file for /home/oracle/ansible/roles/oracle_backup
+- name: Create backup directory
+  ansible.builtin.file:
+    path: /u02/backup/rman
+    state: directory
+    owner: oracle
+    group: oinstall
+    mode: '0775'
+
+- name: Configure RMAN backup script
+  ansible.builtin.copy:
+    content: |
+      run {
+        allocate channel c1 device type disk;
+        backup incremental level 0 database format '/u02/backup/rman/full_%d_%T_%s_%p.bak';
+        backup archivelog all format '/u02/backup/rman/arch_%d_%T_%s_%p.bak';
+        delete noprompt obsolete;
+        release channel c1;
+      }
+    dest: /u02/backup/rman/rman_backup.rman
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+
+- name: Execute RMAN backup
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/rman target / cmdfile=/u02/backup/rman/rman_backup.rman
+  become: yes
+  become_user: oracle
+  register: backup_result
+  failed_when: "'RMAN-' in backup_result.stderr or backup_result.rc != 0"
+
+- name: Validate RMAN backup
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/rman target / <<EOF
+    list backup of database;
+    EOF
+  become: yes
+  become_user: oracle
+  register: backup_validation
+  failed_when: "'Recovery Manager complete.' not in backup_validation.stdout or backup_validation.rc != 0"
+  changed_when: false

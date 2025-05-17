@@ -1,0 +1,19 @@
+---
+- name: Configure RMAN Backup for Production Database
+  hosts: prod
+  vars:
+    db_sid: PROD
+    oracle_home: /u01/app/oracle/product/19.3.0/dbhome_1
+  roles:
+    - oracle_precheck
+    - oracle_backup
+
+- name: Configure RMAN Backup for Test Database
+  hosts: test
+  vars:
+    db_sid: TEST
+    oracle_home: /u01/app/oracle/product/19.3.0/dbhome_1
+  roles:
+    - oracle_precheck
+    - oracle_backup
+
