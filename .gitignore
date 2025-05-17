@@ -1,0 +1,8 @@
+*.log
+tmp/
+ansible-tmp*
+*.bak
+*.tar.gz
+/u02/backup/
+*.zip
+ansible.log

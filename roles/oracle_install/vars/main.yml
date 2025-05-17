@@ -1,0 +1,18 @@
+---
+# vars file for /home/oracle/ansible/roles/oracle_install
+---
+oracle_user: oracle
+oracle_group: oinstall
+oracle_base: /u01/app/oracle
+oracle_home: /u01/app/oracle/product/19.3.0/dbhome_1
+ora_inventory: /u01/app/oraInventory
+oracle_edition: EE
+dba_group: dba
+oper_group: oper
+backupdba_group: backupdba
+dgdba_group: dgdba
+kmdba_group: kmdba
+racdba_group: racdba
+sys_password: Oracle123
+init_params:
+  processes: 100

@@ -1,0 +1,135 @@
+---
+# tasks file for /home/oracle/ansible/roles/oracle_install
+- name: Copy Oracle binaries
+  ansible.builtin.copy:
+    src: files/LINUX.X64_193000_db_home.zip
+    dest: /tmp/LINUX.X64_193000_db_home.zip
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+
+- name: Extract Oracle binaries
+  ansible.builtin.unarchive:
+    src: /tmp/LINUX.X64_193000_db_home.zip
+    dest: "{{ oracle_home }}"
+    owner: oracle
+    group: oinstall
+    remote_src: yes
+
+- name: Copy install response file
+  ansible.builtin.template:
+    src: install.rsp.j2
+    dest: /tmp/install.rsp
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+
+- name: Run Oracle installer
+  ansible.builtin.shell: |
+    export CV_ASSUME_DISTID=OEL7.8
+    {{ oracle_home }}/runInstaller -silent -force -waitforcompletion -ignorePrereqFailure -responseFile /tmp/install.rsp
+  become: yes
+  become_user: oracle
+  register: install_result
+  failed_when: "'Successfully Setup Software.' not in install_result.stdout"
+
+- name: Run orainstRoot.sh
+  ansible.builtin.shell: "{{ ora_inventory }}/orainstRoot.sh"
+  become: yes
+  when: "'orainstRoot.sh' in install_result.stdout"
+
+- name: Run root.sh
+  ansible.builtin.shell: "{{ oracle_home }}/root.sh -silent"
+  become: yes
+
+- name: Copy DBCA response file
+  ansible.builtin.template:
+    src: dbca.rsp.j2
+    dest: /tmp/dbca.rsp
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+
+- name: Create database
+  ansible.builtin.shell: |
+    {{ oracle_home }}/bin/dbca -silent -createDatabase \
+    -responseFile /tmp/dbca.rsp
+  become: yes
+  become_user: oracle
+  register: dbca_result
+  failed_when: "'100% complete' not in dbca_result.stdout"
+
+- name: Set database parameters
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+    alter system set processes={{ init_params.processes }} scope=spfile;
+    shutdown immediate;
+    startup;
+    exit;
+    EOF
+  become: yes
+  become_user: "{{ oracle_user }}"
+  register: dbca_result
+  failed_when: dbca_result.rc != 0
+
+- name: Enable ARCHIVELOG mode
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+    shutdown immediate;
+    startup mount;
+    alter database archivelog;
+    alter database open;
+    exit;
+    EOF
+  become: yes
+  become_user: "{{ oracle_user }}"
+  register: archivelog_result
+  failed_when: archivelog_result.rc != 0
+
+- name: Configure Fast Recovery Area
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+    alter system set db_recovery_file_dest='/u02/oradata' scope=both;
+    alter system set db_recovery_file_dest_size=10G scope=both;
+    exit;
+    EOF
+  become: yes
+  become_user: "{{ oracle_user }}"
+  register: fra_result
+  failed_when: fra_result.rc != 0
+
+- name: Copy listener.ora
+  ansible.builtin.template:
+    src: listener.ora.j2
+    dest: "{{ oracle_home }}/network/admin/listener.ora"
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+
+- name: Copy tnsnames.ora
+  ansible.builtin.template:
+    src: tnsnames.ora.j2
+    dest: "{{ oracle_home }}/network/admin/tnsnames.ora"
+    owner: oracle
+    group: oinstall
+    mode: '0644'
+
+- name: Start listener
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/lsnrctl start
+  become: yes
+  become_user: "{{ oracle_user }}"
+  register: listener_result
+  failed_when: listener_result.rc != 0

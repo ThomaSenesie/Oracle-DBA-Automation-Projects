@@ -1,0 +1,16 @@
+---
+  - name: Apply Oracle patch for PROD database
+    hosts: prod
+    vars:
+      db_sid: PROD
+    roles:
+      - oracle_precheck
+      - oracle_patch
+
+  - name: Apply Oracle patch for TEST database
+    hosts: test
+    vars:
+      db_sid: TEST
+    roles:
+      - oracle_precheck
+      - oracle_patch

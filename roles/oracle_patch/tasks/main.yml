@@ -1,0 +1,293 @@
+---
+     - name: Check disk space for backups and patches
+       ansible.builtin.shell: |
+         df -h /u02 /u01 | awk '/\/u0[12]/ {if ($4+0 < 15000) exit 1}'
+       register: disk_check
+       failed_when: disk_check.rc != 0
+       changed_when: false
+
+     - name: Create directories for backups and patches
+       ansible.builtin.file:
+         path: "{{ item }}"
+         state: directory
+         owner: oracle
+         group: oinstall
+         mode: '0775'
+       loop:
+         - /u02/backup
+         - /u02/backup/oracle_home
+         - /u01/patches
+
+     - name: Copy OPatch file
+       ansible.builtin.copy:
+         src: files/p6880880_190000_Linux-x86-64.zip
+         dest: /u01/patches/p6880880_190000_Linux-x86-64.zip
+         owner: oracle
+         group: oinstall
+         mode: '0644'
+
+     - name: Copy patch file
+       ansible.builtin.copy:
+         src: files/p32545008_190000_Linux-x86-64.zip
+         dest: /u01/patches/p32545008_190000_Linux-x86-64.zip
+         owner: oracle
+         group: oinstall
+         mode: '0644'
+
+     - name: Unzip main patch file
+       ansible.builtin.unarchive:
+         src: /u01/patches/p32545008_190000_Linux-x86-64.zip
+         dest: /u01/patches
+         owner: oracle
+         group: oinstall
+         remote_src: yes
+       become: yes
+       become_user: oracle
+
+     - name: Check for existing Oracle home backup
+       ansible.builtin.shell: |
+         ls /u02/backup/oracle_home/oracle_home_*.tar.gz | wc -l
+       register: home_backup_check
+       failed_when: home_backup_check.rc != 0
+       changed_when: false
+
+     - name: Backup Oracle home
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         tar -zcvf /u02/backup/oracle_home/oracle_home_$(date +%Y%m%d_%H%M%S).tar.gz -C {{ oracle_home }} .
+       become: yes
+       become_user: oracle
+       register: home_backup_result
+       failed_when: home_backup_result.rc != 0
+       changed_when: home_backup_result.rc == 0
+       when: home_backup_check.stdout | int == 0
+
+     - name: Validate Oracle home backup
+       ansible.builtin.stat:
+         path: "/u02/backup/oracle_home/oracle_home_{{ ansible_date_time.date | replace('-', '') }}_{{ ansible_date_time.time | replace(':', '') }}.tar.gz"
+       register: backup_file
+       failed_when: not backup_file.stat.exists or backup_file.stat.size < 1000000
+       when: home_backup_result.changed
+
+     - name: Check for existing RMAN backup
+       ansible.builtin.shell: |
+         ls /u02/backup/pre_patch_{{ db_sid }}_*.bak | wc -l
+       register: rman_backup_check
+       failed_when: rman_backup_check.rc != 0
+       changed_when: false
+
+     - name: Create RMAN Level 0 backup script
+       ansible.builtin.copy:
+         content: |
+           run {
+             allocate channel c1 device type disk;
+             backup incremental level 0 database format '/u02/backup/pre_patch_%d_%T_%s_%p.bak';
+             backup archivelog all format '/u02/backup/arch_%d_%T_%s_%p.bak';
+             release channel c1;
+           }
+         dest: /tmp/rman_pre_patch.rman
+         owner: oracle
+         group: oinstall
+         mode: '0644'
+       when: rman_backup_check.stdout | int == 0
+
+     - name: Run RMAN Level 0 backup before patching
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         export ORACLE_SID={{ db_sid }}
+         {{ oracle_home }}/bin/rman target / cmdfile=/tmp/rman_pre_patch.rman
+       become: yes
+       become_user: oracle
+       register: backup_result
+       failed_when: "'RMAN-' in backup_result.stderr or backup_result.rc != 0"
+       changed_when: "'backup completed' in backup_result.stdout"
+       when: rman_backup_check.stdout | int == 0
+
+     - name: Validate backup
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         export ORACLE_SID={{ db_sid }}
+         {{ oracle_home }}/bin/rman target / <<EOF
+         list backup of database;
+         EOF
+       become: yes
+       become_user: oracle
+       register: backup_validation
+       failed_when: "'Recovery Manager complete.' not in backup_validation.stdout or backup_validation.rc != 0"
+       changed_when: false
+       when: rman_backup_check.stdout | int == 0
+
+     - name: Validate Oracle inventory
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         {{ oracle_home }}/OPatch/opatch lsinventory -detail -oh {{ oracle_home }}
+       become: yes
+       become_user: oracle
+       register: inventory_check
+       failed_when: inventory_check.rc != 0
+       changed_when: false
+
+     - name: Stop listener
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         {{ oracle_home }}/bin/lsnrctl stop
+       become: yes
+       become_user: oracle
+       register: listener_stop
+       failed_when: listener_stop.rc != 0
+       changed_when: "'The command completed successfully' in listener_stop.stdout"
+
+     - name: Stop database
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         export ORACLE_SID={{ db_sid }}
+         sqlplus -s / as sysdba <<EOF
+         SHUTDOWN IMMEDIATE;
+         EXIT;
+         EOF
+       become: yes
+       become_user: oracle
+       register: db_stop
+       failed_when: "'Database closed' not in db_stop.stdout or db_stop.rc != 0"
+       changed_when: "'Database closed' in db_stop.stdout"
+
+     - name: Remove existing OPatch directory
+       ansible.builtin.file:
+         path: "{{ oracle_home }}/OPatch"
+         state: absent
+       become: yes
+       become_user: oracle
+
+     - name: Unzip OPatch
+       ansible.builtin.unarchive:
+         src: /u01/patches/p6880880_190000_Linux-x86-64.zip
+         dest: "{{ oracle_home }}"
+         owner: oracle
+         group: oinstall
+         remote_src: yes
+
+     - name: Verify OPatch version
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         {{ oracle_home }}/OPatch/opatch version
+       become: yes
+       become_user: oracle
+       register: opatch_version
+       failed_when: "'12.2.0.1.24' not in opatch_version.stdout and '12.2.0.1.25' not in opatch_version.stdout"
+
+     - name: Create patch list file for system space check
+       ansible.builtin.copy:
+         content: |
+           /u01/patches/32545008/32545013
+           /u01/patches/32545008/32579761
+         dest: /tmp/patch_list_dbhome.txt
+         owner: oracle
+         group: oinstall
+         mode: '0644'
+     - name: Run OPatch system space check
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         {{ oracle_home }}/OPatch/opatch prereq CheckSystemSpace -phBaseFile /tmp/patch_list_dbhome.txt
+       become: yes
+       become_user: oracle
+       register: space_check
+       failed_when: space_check.rc != 0 or '"checkSystemSpace" passed' not in space_check.stdout
+     
+
+     - name: Run patch conflict check for each sub-patch
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         {{ oracle_home }}/OPatch/opatch prereq CheckConflictAgainstOHWithDetail -phBaseDir /u01/patches/32545008/{{ item }}
+       become: yes
+       become_user: oracle
+       register: conflict_check
+       failed_when: conflict_check.rc != 0 or '"checkConflictAgainstOHWithDetail" passed' not in conflict_check.stdout
+       loop: "{{ sub_patches }}"
+
+     - name: Apply each sub-patch
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         {{ oracle_home }}/OPatch/opatch apply -silent /u01/patches/32545008/{{ item }}
+       become: yes
+       become_user: oracle
+       register: patch_result
+       failed_when: "'OPatch succeeded' not in patch_result.stdout or patch_result.rc != 0"
+       loop: "{{ sub_patches }}"
+
+     - name: Start database
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         export ORACLE_SID={{ db_sid }}
+         sqlplus -s / as sysdba <<EOF
+         STARTUP;
+         EXIT;
+         EOF
+       become: yes
+       become_user: oracle
+       register: db_start
+       failed_when: "'Database opened' not in db_start.stdout or db_stop.rc != 0"
+       changed_when: "'Database opened' in db_start.stdout"
+
+     - name: Run datapatch
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         export ORACLE_SID={{ db_sid }}
+         sqlplus -s /nolog <<EOF
+         CONNECT / AS SYSDBA
+         STARTUP
+         EXIT
+         EOF
+         {{ oracle_home }}/OPatch/datapatch -verbose
+       become: yes
+       become_user: oracle
+       register: datapatch_result
+       failed_when: "'SQL Patching tool complete' not in datapatch_result.stdout or datapatch_result.rc != 0"
+       changed_when: "'SQL Patching tool complete' in datapatch_result.stdout"
+
+     - name: Recompile invalid objects
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         export ORACLE_SID={{ db_sid }}
+         sqlplus -s / as sysdba <<EOF
+         @{{ oracle_home }}/rdbms/admin/utlrp.sql
+         EXIT;
+         EOF
+       become: yes
+       become_user: oracle
+       register: utlrp_result
+       failed_when: utlrp_result.rc != 0
+       changed_when: "'PL/SQL procedure successfully completed' in utlrp_result.stdout"
+
+     - name: Start listener
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         {{ oracle_home }}/bin/lsnrctl start
+       become: yes
+       become_user: oracle
+       register: listener_start
+       failed_when: listener_start.rc != 0
+       changed_when: "'The command completed successfully' in listener_start.stdout"
+       
+     - name: Verify patch application
+       ansible.builtin.shell: |
+         export ORACLE_HOME={{ oracle_home }}
+         export PATH=$ORACLE_HOME/bin:$PATH
+         {{ oracle_home }}/OPatch/opatch lspatches
+       become: yes
+       become_user: oracle
+       register: patch_verify
+       failed_when: patch_verify.rc != 0 or '32545013' not in patch_verify.stdout or '32579761' not in patch_verify.stdout
+       changed_when: false
