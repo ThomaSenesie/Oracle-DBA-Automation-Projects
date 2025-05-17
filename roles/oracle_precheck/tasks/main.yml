@@ -1,0 +1,42 @@
+---
+# tasks file for roles/oracle_precheck
+- name: Check disk space
+  ansible.builtin.shell: |
+    df -h /u02 /u01 | awk '/\/u0[12]/ {if ($4+0 < 5000) exit 1}'
+  register: disk_check
+  failed_when: disk_check.rc != 0
+  changed_when: false
+
+- name: Check memory
+  ansible.builtin.shell: |
+    free -m | awk '/Mem:/ {if ($4+0 < 20) exit 1}'
+  register: mem_check
+  failed_when: mem_check.rc != 0
+  changed_when: false
+
+- name: Check database status
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus -s / as sysdba <<EOF
+    select status from v\$instance;
+    exit;
+    EOF
+  become: yes
+  become_user: oracle
+  register: db_status
+  failed_when: "'OPEN' not in db_status.stdout or db_status.rc != 0"
+  changed_when: false
+
+- name: Check listener status
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/lsnrctl status
+  become: yes
+  become_user: oracle
+  register: listener_status
+  failed_when: "'The command completed successfully' not in listener_status.stdout or listener_status.rc != 0"
+  changed_when: false
