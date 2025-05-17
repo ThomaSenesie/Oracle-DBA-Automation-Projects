@@ -1,0 +1,170 @@
+---
+  - name: Create compliance report directory
+    ansible.builtin.file:
+      path: /u02/backup/compliance
+      state: directory
+      owner: oracle
+      group: oinstall
+      mode: '0775'
+
+  - name: Check user password policies
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      sqlplus -s / as sysdba <<EOF
+      SET HEADING ON
+      SET FEEDBACK OFF
+      SPOOL /u02/backup/compliance/password_policy_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt
+      COLUMN profile FORMAT A20
+      COLUMN resource_name FORMAT A30
+      COLUMN limit FORMAT A20
+      SELECT profile, resource_name, limit
+      FROM dba_profiles
+      WHERE resource_type = 'PASSWORD'
+      AND (resource_name IN ('PASSWORD_LIFE_TIME', 'PASSWORD_REUSE_MAX', 'FAILED_LOGIN_ATTEMPTS')
+      OR limit = 'UNLIMITED');
+      SPOOL OFF
+      EXIT;
+      EOF
+    become: yes
+    become_user: oracle
+    register: password_policy
+    failed_when: password_policy.rc != 0
+
+  - name: Check audit trail settings
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      sqlplus -s / as sysdba <<EOF
+      SET HEADING ON
+      SET FEEDBACK OFF
+      SPOOL /u02/backup/compliance/audit_trail_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt
+      COLUMN name FORMAT A30
+      COLUMN value FORMAT A20
+      SELECT name, value
+      FROM v\$parameter
+      WHERE name LIKE 'audit%';
+      SPOOL OFF
+      EXIT;
+      EOF
+    become: yes
+    become_user: oracle
+    register: audit_trail
+    failed_when: audit_trail.rc != 0
+
+  - name: Check privileged and application users
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      sqlplus -s / as sysdba <<EOF
+      SET HEADING ON
+      SET FEEDBACK OFF
+      SPOOL /u02/backup/compliance/privileged_users_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt
+      COLUMN grantee FORMAT A20
+      COLUMN granted_role FORMAT A20
+      SELECT grantee, granted_role
+      FROM dba_role_privs
+      WHERE granted_role IN ('DBA', 'SYSDBA', 'SYSOPER')
+      UNION
+      SELECT username, 'APPLICATION' AS role
+      FROM dba_users
+      WHERE account_status = 'OPEN'
+      AND default_tablespace NOT IN ('SYSTEM', 'SYSAUX')
+      AND username NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'DBSNMP');
+      SPOOL OFF
+      EXIT;
+      EOF
+    become: yes
+    become_user: oracle
+    register: priv_users
+    failed_when: priv_users.rc != 0
+
+  - name: Check system and role privileges
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      sqlplus -s / as sysdba <<EOF
+      SET HEADING ON
+      SET FEEDBACK OFF
+      SPOOL /u02/backup/compliance/system_privileges_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt
+      COLUMN grantee FORMAT A20
+      COLUMN privilege FORMAT A30
+      COLUMN granted_role FORMAT A20
+      SELECT grantee, privilege, NULL AS granted_role
+      FROM dba_sys_privs
+      WHERE grantee IN (
+        SELECT grantee FROM dba_role_privs WHERE granted_role IN ('DBA', 'SYSDBA', 'SYSOPER')
+        UNION
+        SELECT username FROM dba_users
+        WHERE account_status = 'OPEN'
+        AND default_tablespace NOT IN ('SYSTEM', 'SYSAUX')
+        AND username NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'DBSNMP')
+        UNION
+        SELECT 'SYS' FROM dual
+        UNION
+        SELECT 'SYSTEM' FROM dual
+      )
+      UNION
+      SELECT grantee, NULL AS privilege, granted_role
+      FROM dba_role_privs
+      WHERE grantee IN (
+        SELECT grantee FROM dba_role_privs WHERE granted_role IN ('DBA', 'SYSDBA', 'SYSOPER')
+        UNION
+        SELECT username FROM dba_users
+        WHERE account_status = 'OPEN'
+        AND default_tablespace NOT IN ('SYSTEM', 'SYSAUX')
+        AND username NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'DBSNMP')
+        UNION
+        SELECT 'SYS' FROM dual
+        UNION
+        SELECT 'SYSTEM' FROM dual
+      )
+      ORDER BY grantee, privilege, granted_role;
+      SPOOL OFF
+      EXIT;
+      EOF
+    become: yes
+    become_user: oracle
+    register: system_privileges
+    failed_when: system_privileges.rc != 0
+
+  - name: Check object privileges
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      sqlplus -s / as sysdba <<EOF
+      SET HEADING ON
+      SET FEEDBACK OFF
+      SPOOL /u02/backup/compliance/object_privileges_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt
+      COLUMN grantee FORMAT A20
+      COLUMN owner FORMAT A20
+      COLUMN table_name FORMAT A30
+      COLUMN privilege FORMAT A20
+      COLUMN grantor FORMAT A20
+      SELECT grantee, owner, table_name, privilege, grantor
+      FROM dba_tab_privs
+      WHERE grantee IN (
+        SELECT grantee FROM dba_role_privs WHERE granted_role IN ('DBA', 'SYSDBA', 'SYSOPER')
+        UNION
+        SELECT username FROM dba_users
+        WHERE account_status = 'OPEN'
+        AND default_tablespace NOT IN ('SYSTEM', 'SYSAUX')
+        AND username NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'DBSNMP')
+        UNION
+        SELECT 'SYS' FROM dual
+        UNION
+        SELECT 'SYSTEM' FROM dual
+      )
+      ORDER BY grantee, owner, table_name, privilege;
+      SPOOL OFF
+      EXIT;
+      EOF
+    become: yes
+    become_user: oracle
+    register: object_privileges
+    failed_when: object_privileges.rc != 0

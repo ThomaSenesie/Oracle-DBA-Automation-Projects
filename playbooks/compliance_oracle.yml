@@ -1,0 +1,16 @@
+---
+- name: Oracle 19c compliance checks for PROD database
+  hosts: prod
+  vars:
+    db_sid: PROD
+  roles:
+    - oracle_precheck
+    - oracle_compliance
+
+- name: Oracle 19c compliance checks for TEST database
+  hosts: test
+  vars:
+    db_sid: TEST
+  roles:
+    - oracle_precheck
+    - oracle_compliance
