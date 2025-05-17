@@ -1,0 +1,20 @@
+---
+# tasks file for /home/oracle/ansible/roles/oracle_user
+- name: Create database user
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+    create user app_user identified by AppPass123
+    default tablespace APP_DATA
+    temporary tablespace TEMP
+    quota 100M on APP_DATA;
+    grant create session, create table, resource, connect to app_user;
+    exit;
+    EOF
+  become: yes
+  become_user: oracle
+  register: user_result
+  failed_when: "'ORA-' in user_result.stderr or user_result.rc != 0"
+  changed_when: "'USER created' in user_result.stdout"
