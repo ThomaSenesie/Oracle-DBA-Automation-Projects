@@ -1,0 +1,38 @@
+---
+- name: Detect wait events in PROD database
+  hosts: prod-server
+  become: yes
+  become_user: oracle
+  vars:
+    oracle_home: /u01/app/oracle/product/19.3.0/dbhome_1
+    db_sid: PROD
+  tasks:
+    - name: Query wait events
+      ansible.builtin.shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        export ORACLE_SID={{ db_sid }}
+        sqlplus -s / as sysdba <<EOF
+        SET LINESIZE 200
+        SET PAGESIZE 100
+        COL SID FORMAT A10
+        COL EVENT FORMAT A30
+        COL SQL_TEXT FORMAT A50
+        SELECT
+          s.sid,
+          s.event,
+          s.wait_time,
+          s.seconds_in_wait,
+          sql.sql_text
+        FROM v\$session s
+        LEFT JOIN v\$sql sql ON s.sql_id = sql.sql_id
+        WHERE s.wait_class != 'Idle' AND s.state = 'WAITING';
+        EXIT;
+        EOF
+      register: wait_result
+      failed_when: wait_result.rc != 0
+      changed_when: false
+
+    - name: Display wait event details
+      ansible.builtin.debug:
+        msg: "{{ wait_result.stdout_lines }}"
