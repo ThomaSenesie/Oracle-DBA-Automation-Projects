@@ -1,0 +1,11 @@
+---
+# vars file for /home/oracle/ansible/roles/oracle_tablespace
+oracle_user: oracle
+oracle_group: oinstall
+oracle_home: /u01/app/oracle/product/19.3.0/dbhome_1
+tablespace_name: APP_DATA
+datafile_path: /u02/oradata/{{ db_sid }}/app_data01.dbf
+tablespace_size: 20M
+users_tablespace: USERS
+users_datafile: /u02/oradata/{{ db_sid }}/users01.dbf
+resize_size: 20M

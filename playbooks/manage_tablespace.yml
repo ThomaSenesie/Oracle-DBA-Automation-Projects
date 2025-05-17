@@ -1,0 +1,16 @@
+---
+   - name: Manage Tablespaces for Production Database
+     hosts: prod
+     vars:
+       db_sid: PROD
+     roles:
+       - oracle_precheck
+       - oracle_tablespace
+
+   - name: Manage Tablespaces for Test Database
+     hosts: test
+     vars:
+       db_sid: TEST
+     roles:
+       - oracle_precheck
+       - oracle_tablespace

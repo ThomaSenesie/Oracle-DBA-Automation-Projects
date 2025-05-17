@@ -1,0 +1,64 @@
+---
+# tasks file for /home/oracle/ansible/roles/oracle_tablespace
+- name: Check disk space
+  ansible.builtin.shell: |
+    df -h /u02 | awk '/\/u02/ {if ($4+0 < 5000) exit 1}'
+  register: disk_check
+  failed_when: disk_check.rc != 0
+  changed_when: false
+
+- name: Create tablespace
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+    CREATE TABLESPACE {{ tablespace_name }}
+    DATAFILE '{{ datafile_path }}' SIZE {{ tablespace_size }}
+    AUTOEXTEND ON NEXT 5M MAXSIZE 100M;
+    exit;
+    EOF
+  become: yes
+  become_user: oracle
+  register: create_ts_result
+  failed_when: "'ORA-' in create_ts_result.stderr or create_ts_result.rc != 0"
+  changed_when: "'TABLESPACE created' in create_ts_result.stdout"
+
+- name: Resize USERS tablespace
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+    ALTER DATABASE DATAFILE '{{ users_datafile }}' RESIZE {{ resize_size }};
+    exit;
+    EOF
+  become: yes
+  become_user: oracle
+  register: resize_ts_result
+  failed_when: "'ORA-' in resize_ts_result.stderr or resize_ts_result.rc != 0"
+  changed_when: "'altered' in resize_ts_result.stdout"
+
+- name: Monitor tablespace usage
+  ansible.builtin.shell: |
+    export ORACLE_HOME={{ oracle_home }}
+    export PATH=$ORACLE_HOME/bin:$PATH
+    export ORACLE_SID={{ db_sid }}
+    {{ oracle_home }}/bin/sqlplus -s / as sysdba <<EOF
+    set heading off feedback off pagesize 0
+    select tablespace_name || ':' || round((used_space/total_space)*100) as usage
+    from dba_tablespace_usage_metrics
+    where round((used_space/total_space)*100) > 80;
+    exit;
+    EOF
+  become: yes
+  become_user: oracle
+  register: ts_usage
+  failed_when: "'ORA-' in ts_usage.stderr or ts_usage.rc != 0"
+  changed_when: false
+
+- name: Alert on high tablespace usage
+  ansible.builtin.debug:
+    msg: "High tablespace usage detected: {{ item }}"
+  loop: "{{ ts_usage.stdout_lines }}"
+  when: ts_usage.stdout_lines | length > 0
