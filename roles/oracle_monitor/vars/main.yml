@@ -1,0 +1,3 @@
+---
+# vars file for roles/oracle_monitor
+oracle_home: /u01/app/oracle/product/19.3.0/dbhome_1

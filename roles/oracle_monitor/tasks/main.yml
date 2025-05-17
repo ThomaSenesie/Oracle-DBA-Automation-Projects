@@ -1,0 +1,203 @@
+---
+# tasks file for roles/oracle_monitor
+  - name: Create monitoring report directory
+    ansible.builtin.file:
+      path: /u02/backup/monitor
+      state: directory
+      owner: oracle
+      group: oinstall
+      mode: '0775'
+
+  - name: Check listener status
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      lsnrctl status
+    become: yes
+    become_user: oracle
+    register: listener_status
+    failed_when: false
+
+  - name: Start listener if not running
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      lsnrctl start
+    become: yes
+    become_user: oracle
+    when: listener_status.rc != 0 or 'The command completed successfully' not in listener_status.stdout
+    register: listener_start
+    failed_when: listener_start.rc != 0
+
+  - name: Save listener status
+    ansible.builtin.copy:
+      content: "{{ (listener_start.skipped | default(true)) | ternary(listener_status.stdout, listener_start.stdout) }}"
+      dest: /u02/backup/monitor/listener_status_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt
+      owner: oracle
+      group: oinstall
+      mode: '0644'
+    become: yes
+    become_user: oracle
+
+  - name: Check database status
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      sqlplus -s / as sysdba <<EOF
+      SET HEADING OFF
+      SET FEEDBACK OFF
+      SELECT instance_name || ' ' || status FROM v\$instance;
+      EXIT;
+      EOF
+    become: yes
+    become_user: oracle
+    register: db_status
+    failed_when: false
+
+  - name: Start database if not running
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      sqlplus -s / as sysdba <<EOF
+      STARTUP;
+      EXIT;
+      EOF
+    become: yes
+    become_user: oracle
+    when: db_status.rc != 0 or 'OPEN' not in db_status.stdout
+    register: db_start
+    failed_when: db_start.rc != 0 or 'Database opened' not in db_start.stdout
+
+  - name: Save database status
+    ansible.builtin.copy:
+      content: "{{ (db_start.skipped | default(true)) | ternary(db_status.stdout, db_start.stdout) }}"
+      dest: /u02/backup/monitor/db_status_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt
+      owner: oracle
+      group: oinstall
+      mode: '0644'
+    become: yes
+    become_user: oracle
+
+  - name: Check tablespace usage
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      sqlplus -s / as sysdba <<EOF
+      SET HEADING ON
+      SET FEEDBACK OFF
+      SPOOL /u02/backup/monitor/tablespace_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt
+      COLUMN tablespace_name FORMAT A30
+      COLUMN used_mb FORMAT 99999.99
+      COLUMN max_mb FORMAT 99999.99
+      COLUMN percent_used FORMAT 999.99
+      COLUMN status FORMAT A20
+      SELECT tablespace_name,
+             ROUND((bytes/1024/1024),2) AS used_mb,
+             ROUND((maxbytes/1024/1024),2) AS max_mb,
+             ROUND((bytes/maxbytes)*100,2) AS percent_used,
+             CASE WHEN ROUND((bytes/maxbytes)*100,2) > 85 THEN 'WARNING: High Usage' ELSE 'Safe for now' END AS status
+      FROM dba_data_files
+      WHERE maxbytes > 0;
+      SPOOL OFF
+      EXIT;
+      EOF
+    become: yes
+    become_user: oracle
+    register: tablespace_usage
+    failed_when: tablespace_usage.rc != 0
+
+  - name: Check alert log errors
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export ORACLE_BASE=/u01/app/oracle
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      tail -n 100 /u01/app/oracle/diag/rdbms/{{ db_sid | lower }}/{{ db_sid }}/trace/alert_{{ db_sid }}.log | grep -i "ORA-" > /u02/backup/monitor/alert_log_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt
+      if [ ! -s /u02/backup/monitor/alert_log_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt ]; then
+        echo "No errors to worry about" > /u02/backup/monitor/alert_log_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt
+      fi
+    become: yes
+    become_user: oracle
+    register: alert_log
+    failed_when: alert_log.rc != 0 and alert_log.rc != 1
+
+  - name: Query wait events
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      sqlplus -s / as sysdba <<EOF
+      SET LINESIZE 200
+      SET PAGESIZE 100
+      SET HEADING ON
+      SET FEEDBACK OFF
+      SPOOL /u02/backup/monitor/waits_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt
+      COL sid FORMAT A10
+      COL event FORMAT A30
+      COL sql_text FORMAT A50
+      SELECT s.sid, s.event, s.wait_time, s.seconds_in_wait, sql.sql_text
+      FROM v\$session s
+      LEFT JOIN v\$sql sql ON s.sql_id = sql.sql_id
+      WHERE s.wait_class != 'Idle' AND s.state = 'WAITING'
+      UNION
+      SELECT NULL, NULL, NULL, NULL, 'No wait events found' FROM dual
+      WHERE NOT EXISTS (
+        SELECT 1 FROM v\$session s
+        WHERE s.wait_class != 'Idle' AND s.state = 'WAITING'
+      );
+      SPOOL OFF
+      EXIT;
+      EOF
+    become: yes
+    become_user: oracle
+    register: wait_events
+    failed_when: wait_events.rc != 0
+
+  - name: Query blocking sessions
+    ansible.builtin.shell: |
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      sqlplus -s / as sysdba <<EOF
+      SET LINESIZE 200
+      SET PAGESIZE 100
+      SET HEADING ON
+      SET FEEDBACK OFF
+      SPOOL /u02/backup/monitor/blocks_{{ db_sid }}_{{ ansible_date_time.date | replace('-', '') }}.txt
+      COL blocking_session FORMAT A15
+      COL waiting_session FORMAT A15
+      COL blocking_user FORMAT A15
+      COL waiting_user FORMAT A15
+      COL lock_type FORMAT A10
+      COL object_name FORMAT A20
+      COL sql_text FORMAT A50
+      SELECT
+        s1.sid || ',' || s1.serial# AS blocking_session,
+        s1.username AS blocking_user,
+        s2.sid || ',' || s2.serial# AS waiting_session,
+        s2.username AS waiting_user,
+        l1.type AS lock_type,
+        o.object_name,
+        sql.sql_text
+      FROM v\$session s1
+      JOIN v\$session s2 ON s1.sid = s2.blocking_session
+      JOIN v\$lock l1 ON s1.sid = l1.sid
+      LEFT JOIN v\$sql sql ON s2.sql_id = sql.sql_id
+      LEFT JOIN dba_objects o ON l1.id1 = o.object_id
+      WHERE s2.blocking_session IS NOT NULL
+      UNION
+      SELECT NULL, NULL, NULL, NULL, NULL, NULL, 'No blocking sessions found' FROM dual
+      WHERE NOT EXISTS (
+        SELECT 1 FROM v\$session s2
+        WHERE s2.blocking_session IS NOT NULL
+      );
+      SPOOL OFF
+      EXIT;
+      EOF
+    become: yes
+    become_user: oracle
+    register: block_sessions
+    failed_when: block_sessions.rc != 0

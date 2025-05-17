@@ -1,0 +1,16 @@
+---
+- name: Oracle 19c monitoring for PROD database
+  hosts: prod
+  vars:
+    db_sid: PROD
+  roles:
+    - oracle_precheck
+    - oracle_monitor
+
+- name: Oracle 19c monitoring for TEST database
+  hosts: test
+  vars:
+    db_sid: TEST
+  roles:
+    - oracle_precheck
+    - oracle_monitor
