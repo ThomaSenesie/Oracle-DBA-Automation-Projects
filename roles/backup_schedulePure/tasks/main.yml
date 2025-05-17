@@ -1,0 +1,88 @@
+---
+# tasks file for /home/oracle/ansible/roles/backup_schedulePure
+---
+- name: Create RMAN backup directory
+  ansible.builtin.file:
+    path: "{{ backup_dir }}"
+    state: directory
+    owner: oracle
+    group: oinstall
+    mode: '0775'
+
+- name: Create scripts directory
+  ansible.builtin.file:
+    path: /u02/scripts
+    state: directory
+    owner: oracle
+    group: oinstall
+    mode: '0775'
+
+- name: Deploy RMAN full backup script
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      rman target / <<EOF
+      CONFIGURE RETENTION POLICY TO REDUNDANCY 2;
+      CONFIGURE CONTROLFILE AUTOBACKUP ON;
+      RUN {
+        ALLOCATE CHANNEL c1 DEVICE TYPE DISK FORMAT '{{ backup_dir }}/full_%U';
+        ALLOCATE CHANNEL c2 DEVICE TYPE DISK FORMAT '{{ backup_dir }}/full_%U';
+        BACKUP INCREMENTAL LEVEL 0 DATABASE PLUS ARCHIVELOG;
+        RELEASE CHANNEL c1;
+        RELEASE CHANNEL c2;
+      }
+      DELETE NOPROMPT OBSOLETE;
+      EXIT;
+      EOF
+    dest: /u02/scripts/rman_full_backup.sh
+    owner: oracle
+    group: oinstall
+    mode: '0755'
+
+- name: Deploy RMAN incremental backup script
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      export ORACLE_HOME={{ oracle_home }}
+      export PATH=$ORACLE_HOME/bin:$PATH
+      export ORACLE_SID={{ db_sid }}
+      rman target / <<EOF
+      CONFIGURE RETENTION POLICY TO REDUNDANCY 2;
+      CONFIGURE CONTROLFILE AUTOBACKUP ON;
+      RUN {
+        ALLOCATE CHANNEL c1 DEVICE TYPE DISK FORMAT '{{ backup_dir }}/incr_%U';
+        ALLOCATE CHANNEL c2 DEVICE TYPE DISK FORMAT '{{ backup_dir }}/incr_%U';
+        BACKUP INCREMENTAL LEVEL 1 DATABASE PLUS ARCHIVELOG;
+        RELEASE CHANNEL c1;
+        RELEASE CHANNEL c2;
+      }
+      DELETE NOPROMPT OBSOLETE;
+      EXIT;
+      EOF
+    dest: /u02/scripts/rman_incremental_backup.sh
+    owner: oracle
+    group: oinstall
+    mode: '0755'
+
+- name: Schedule weekly full RMAN backup
+  ansible.builtin.cron:
+    name: "RMAN weekly full backup"
+    user: oracle
+    minute: "0"
+    hour: "0"
+    weekday: "0"  # Sunday
+    job: "/u02/scripts/rman_full_backup.sh > {{ backup_dir }}/rman_full_backup_{{ ansible_date_time.date | replace('-', '') }}.log 2>&1"
+    state: present
+
+- name: Schedule daily incremental RMAN backup
+  ansible.builtin.cron:
+    name: "RMAN daily incremental backup"
+    user: oracle
+    minute: "0"
+    hour: "2"
+    weekday: "1-6"  # Monday-Saturday
+    job: "/u02/scripts/rman_incremental_backup.sh > {{ backup_dir }}/rman_incremental_backup_{{ ansible_date_time.date | replace('-', '') }}.log 2>&1"
+    state: present

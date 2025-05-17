@@ -1,0 +1,10 @@
+---
+- name: Schedule RMAN backups for PROD and TEST
+  hosts: all
+  become: yes
+  become_user: oracle
+  vars:
+    oracle_home: /u01/app/oracle/product/19.3.0/dbhome_1
+    backup_dir: /u02/backup/rman
+  roles:
+    - backup_schedulePure
