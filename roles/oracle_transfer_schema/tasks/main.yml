@@ -1,0 +1,160 @@
+---
+# tasks file for /home/oracle/ansible/roles/oracle_transfer_schema
+---
+   - name: Clean up existing files on prod-server
+     ansible.builtin.file:
+       path: "{{ item }}"
+       state: absent
+     loop:
+       - /u02/backup/dpump/app_user_{{ ansible_date_time.date | replace('-', '') }}.dmp
+       - /u02/backup/dpump/app_user_exp.log
+     when: inventory_hostname == 'prod-server'
+
+   - name: Clean up existing files on test-server
+     ansible.builtin.file:
+       path: "{{ item }}"
+       state: absent
+     loop:
+       - /u02/backup/dpump/app_user_{{ ansible_date_time.date | replace('-', '') }}.dmp
+       - /u02/backup/dpump/app_user_imp.log
+     when: inventory_hostname == 'test-server'
+
+   - name: Create Data Pump directory on source (PROD)
+     ansible.builtin.shell: |
+       export ORACLE_HOME={{ oracle_home }}
+       export PATH=$ORACLE_HOME/bin:$PATH
+       export ORACLE_SID={{ db_sid }}
+       {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+       CREATE OR REPLACE DIRECTORY dpump_dir AS '/u02/backup/dpump';
+       GRANT READ, WRITE ON DIRECTORY dpump_dir TO SYSTEM;
+       EXIT;
+       EOF
+     become: yes
+     become_user: oracle
+     register: create_dpump_dir
+     failed_when: "'ORA-' in create_dpump_dir.stderr or create_dpump_dir.rc != 0"
+     changed_when: "'Directory created' in create_dpump_dir.stdout or 'Directory replaced' in create_dpump_dir.stdout"
+     when: inventory_hostname == 'prod-server'
+
+   - name: Create Data Pump dump directory on source (PROD)
+     ansible.builtin.file:
+       path: /u02/backup/dpump
+       state: directory
+       owner: oracle
+       group: oinstall
+       mode: '0775'
+     when: inventory_hostname == 'prod-server'
+
+   - name: Export schema from source (PROD)
+     ansible.builtin.shell: |
+       export ORACLE_HOME={{ oracle_home }}
+       export PATH=$ORACLE_HOME/bin:$PATH
+       export ORACLE_SID={{ db_sid }}
+       {{ oracle_home }}/bin/expdp system/Oracle123 schemas=APP_USER directory=dpump_dir dumpfile=app_user_%T.dmp logfile=app_user_exp.log PARALLEL=2
+     become: yes
+     become_user: oracle
+     register: export_result
+     failed_when: "'ORA-' in export_result.stderr or export_result.rc != 0"
+     changed_when: "'successfully completed' in export_result.stdout"
+     async: 3600
+     poll: 60
+     when: inventory_hostname == 'prod-server'
+
+   - name: Set permissions on dump file
+     ansible.builtin.file:
+       path: /u02/backup/dpump/app_user_{{ ansible_date_time.date | replace('-', '') }}.dmp
+       owner: oracle
+       group: oinstall
+       mode: '0644'
+     when: inventory_hostname == 'prod-server'
+
+   - name: Copy dump file to target (TEST)
+     block:
+       - name: Attempt SCP to test-server
+         ansible.builtin.command:
+           cmd: scp -v -o ConnectTimeout=5 -o StrictHostKeyChecking=no /u02/backup/dpump/app_user_{{ ansible_date_time.date | replace('-', '') }}.dmp oracle@192.168.56.102:/u02/backup/dpump/
+         delegate_to: prod-server
+         register: copy_result
+         changed_when: copy_result.rc == 0
+         failed_when: copy_result.rc != 0
+     rescue:
+       - name: Retry SCP to test-server
+         ansible.builtin.command:
+           cmd: scp -v -o ConnectTimeout=5 -o StrictHostKeyChecking=no /u02/backup/dpump/app_user_{{ ansible_date_time.date | replace('-', '') }}.dmp oracle@192.168.56.102:/u02/backup/dpump/
+         delegate_to: prod-server
+         register: copy_result
+         changed_when: copy_result.rc == 0
+         failed_when: copy_result.rc != 0
+     when: inventory_hostname == 'test-server'
+
+   - name: Debug copy result
+     ansible.builtin.debug:
+       msg: "Copy result: {{ copy_result }}"
+     when: inventory_hostname == 'test-server'
+
+   - name: Check if dump file exists on test-server
+     ansible.builtin.stat:
+       path: /u02/backup/dpump/app_user_{{ ansible_date_time.date | replace('-', '') }}.dmp
+     register: dump_file_check
+     when: inventory_hostname == 'test-server'
+
+   - name: Fail if dump file does not exist
+     ansible.builtin.fail:
+       msg: "Dump file missing on test-server!"
+     when: inventory_hostname == 'test-server' and not dump_file_check.stat.exists
+
+   - name: Create Data Pump directory on target (TEST)
+     ansible.builtin.shell: |
+       export ORACLE_HOME={{ oracle_home }}
+       export PATH=$ORACLE_HOME/bin:$PATH
+       export ORACLE_SID={{ db_sid }}
+       {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+       CREATE OR REPLACE DIRECTORY dpump_dir AS '/u02/backup/dpump';
+       GRANT READ, WRITE ON DIRECTORY dpump_dir TO SYSTEM;
+       EXIT;
+       EOF
+     become: yes
+     become_user: oracle
+     register: create_dpump_dir_target
+     failed_when: "'ORA-' in create_dpump_dir_target.stderr or create_dpump_dir_target.rc != 0"
+     changed_when: "'Directory created' in create_dpump_dir_target.stdout or 'Directory replaced' in create_dpump_dir_target.stdout"
+     when: inventory_hostname == 'test-server'
+
+   - name: Create Data Pump dump directory on target (TEST)
+     ansible.builtin.file:
+       path: /u02/backup/dpump
+       state: directory
+       owner: oracle
+       group: oinstall
+       mode: '0775'
+     when: inventory_hostname == 'test-server'
+
+   - name: Import schema to target (TEST)
+     ansible.builtin.shell: |
+       export ORACLE_HOME={{ oracle_home }}
+       export PATH=$ORACLE_HOME/bin:$PATH
+       export ORACLE_SID={{ db_sid }}
+       {{ oracle_home }}/bin/impdp system/Oracle123 schemas=APP_USER directory=dpump_dir dumpfile=app_user_{{ ansible_date_time.date | replace('-', '') }}.dmp logfile=app_user_imp.log remap_schema=APP_USER:APP_USER_TEST
+     become: yes
+     become_user: oracle
+     register: import_result
+     failed_when: "'ORA-' in import_result.stderr or import_result.rc != 0"
+     changed_when: "'successfully completed' in import_result.stdout"
+     when: inventory_hostname == 'test-server'
+
+   - name: Verify schema import on target (TEST)
+     ansible.builtin.shell: |
+       export ORACLE_HOME={{ oracle_home }}
+       export PATH=$ORACLE_HOME/bin:$PATH
+       export ORACLE_SID={{ db_sid }}
+       {{ oracle_home }}/bin/sqlplus / as sysdba <<EOF
+       SELECT username FROM dba_users WHERE username = 'APP_USER_TEST';
+       EXIT;
+       EOF
+     become: yes
+     become_user: oracle
+     register: verify_user
+     failed_when: "'APP_USER_TEST' not in verify_user.stdout or verify_user.rc != 0"
+     changed_when: false
+     when: inventory_hostname == 'test-server'vi ~/ansible/transfer_schema.yml
+

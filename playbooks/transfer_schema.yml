@@ -1,0 +1,9 @@
+---
+- name: Transfer APP_USER Schema from PROD to TEST
+  hosts: all
+  vars:
+    db_sid: "{{ 'PROD' if inventory_hostname == 'prod-server' else 'TEST' }}"
+    oracle_home: /u01/app/oracle/product/19.3.0/dbhome_1
+  roles:
+    - oracle_precheck
+    - oracle_transfer_schema
